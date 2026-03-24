@@ -1,0 +1,131 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "MotoGP Sensor",
+        "description": "Configura l'integrazione MotoGP Sensor.",
+        "data": {
+          "sensor_name": "Nome del dispositivo",
+          "enabled_sensors": "Sensori da abilitare",
+          "live_source": "Sorgente timing live",
+          "race_week_start_day": "Giorno di inizio settimana gara"
+        },
+        "data_description": {
+          "sensor_name": "Nome visualizzato in Home Assistant (es. \"MotoGP\")",
+          "enabled_sensors": "Seleziona i sensori da creare",
+          "live_source": "Sorgente dati per il timing live della sessione",
+          "race_week_start_day": "Giorno della settimana da cui inizia la finestra settimana gara"
+        }
+      },
+      "reconfigure": {
+        "title": "Riconfigura MotoGP Sensor",
+        "description": "Aggiorna le impostazioni di MotoGP Sensor.",
+        "data": {
+          "sensor_name": "Nome del dispositivo",
+          "enabled_sensors": "Sensori da abilitare",
+          "live_source": "Sorgente timing live",
+          "race_week_start_day": "Giorno di inizio settimana gara"
+        },
+        "data_description": {
+          "sensor_name": "Nome visualizzato in Home Assistant",
+          "enabled_sensors": "Seleziona i sensori da creare",
+          "live_source": "Sorgente dati per il timing live della sessione",
+          "race_week_start_day": "Giorno della settimana da cui inizia la finestra settimana gara"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Connessione alle API MotoGP non riuscita"
+    },
+    "abort": {
+      "already_configured": "MotoGP Sensor è già configurato",
+      "reconfigure_successful": "Configurazione aggiornata con successo"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "next_race": {
+        "name": "Prossima Gara"
+      },
+      "current_season": {
+        "name": "Stagione Corrente"
+      },
+      "rider_standings": {
+        "name": "Classifica Piloti"
+      },
+      "last_race_results": {
+        "name": "Risultati Ultima Gara"
+      },
+      "session_status": {
+        "name": "Stato Sessione"
+      },
+      "current_session": {
+        "name": "Sessione Corrente"
+      },
+      "race_lap_count": {
+        "name": "Giri Percorsi"
+      },
+      "rider_list": {
+        "name": "Lista Piloti"
+      },
+      "rider_positions": {
+        "name": "Posizioni Piloti"
+      },
+      "top_three": {
+        "name": "Podio"
+      },
+      "leader": {
+        "name": "Leader"
+      },
+      "fastest_lap": {
+        "name": "Giro Veloce"
+      },
+      "session_time_remaining": {
+        "name": "Tempo Rimanente Sessione"
+      },
+      "live_timing_source": {
+        "name": "Sorgente Timing Live"
+      },
+      "official_live_diagnostic": {
+        "name": "Diagnostica Timing Live Ufficiale"
+      },
+      "constructor_standings": {
+        "name": "Classifica Costruttori"
+      },
+      "track_weather": {
+        "name": "Meteo Pista"
+      },
+      "pit_stops": {
+        "name": "Pit Stop"
+      }
+    },
+    "binary_sensor": {
+      "race_week": {
+        "name": "Settimana Gara"
+      },
+      "live_timing_online": {
+        "name": "Timing Live Online"
+      }
+    },
+    "calendar": {
+      "season_calendar": {
+        "name": "Calendario Stagione"
+      }
+    },
+    "switch": {
+      "no_spoiler_mode": {
+        "name": "Modalità No Spoiler"
+      }
+    },
+    "select": {
+      "live_source": {
+        "name": "Sorgente Live",
+        "state": {
+          "pulselive": "Pulselive",
+          "official": "Ufficiale",
+          "auto": "Automatico"
+        }
+      }
+    }
+  }
+}

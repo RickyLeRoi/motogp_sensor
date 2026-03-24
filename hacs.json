@@ -1,0 +1,6 @@
+{
+    "filename": "motogp_sensor.zip",
+    "homeassistant": "2023.8.0",
+    "name": "MotoGP Sensor",
+    "zip_release": true
+}

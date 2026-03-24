@@ -1,0 +1,12 @@
+{
+    "domain": "motogp_sensor",
+    "name": "MotoGP Sensor",
+    "after_dependencies": ["logbook", "recorder"],
+    "codeowners": ["@RickyLeRoi"],
+    "config_flow": true,
+    "documentation": "https://github.com/RickyLeRoi/motogp_sensor",
+    "iot_class": "cloud_polling",
+    "issue_tracker": "https://github.com/RickyLeRoi/motogp_sensor/issues",
+    "requirements": ["python-dateutil>=2.8"],
+    "version": "1.0.0"
+}
