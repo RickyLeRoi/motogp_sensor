@@ -26,7 +26,7 @@ from .const import (
     LIVE_SOURCE_PULSELIVE,
 )
 from .entity import MotoGPAuxEntity, MotoGPBaseEntity, default_object_id, set_suggested_object_id
-from .helpers import circuit_name, compute_fastest_lap, find_next_event
+from .helpers import circuit_name, compute_fastest_lap, extract_session_schedule, find_next_event
 
 
 
@@ -123,23 +123,85 @@ class MotoGPNextRaceSensor(MotoGPBaseSensor):
         data = self.coordinator.data
         if not isinstance(data, dict):
             return None
-        event = find_next_event(data.get("events") or [])
+        events: list[dict] = data.get("events") or []
+        event = find_next_event(events)
         if not event:
             return None
-        circuit = event.get("circuit") or {}
+
+        # country is a top-level event field: {"iso": "TH", "name": "Thailand", ...}
+        country_obj = event.get("country")
         country: str | None = None
-        if isinstance(circuit, dict):
-            country_obj = circuit.get("country")
-            if isinstance(country_obj, dict):
-                country = country_obj.get("name") or country_obj.get("iso")
-            else:
-                country = str(country_obj) if country_obj else None
+        if isinstance(country_obj, dict):
+            country = country_obj.get("name") or country_obj.get("iso")
+        elif country_obj:
+            country = str(country_obj)
+
+        # round: derive from legacy_id (eventId for MotoGP categoryId==1),
+        # fall back to 1-based position in the events list
+        round_number: int | None = None
+        legacy_id = event.get("legacy_id")
+        if isinstance(legacy_id, list):
+            for entry in legacy_id:
+                if isinstance(entry, dict) and entry.get("categoryId") == 1:
+                    with suppress(Exception):
+                        round_number = int(entry["eventId"])
+                    break
+        if round_number is None:
+            with suppress(Exception):
+                round_number = events.index(event) + 1
+
+        # circuit details
+        circuit_obj = event.get("circuit") or {}
+        c_name: str | None = None
+        c_locality: str | None = None
+        c_country: str | None = None
+        if isinstance(circuit_obj, dict):
+            c_name = circuit_obj.get("name")
+            c_locality = circuit_obj.get("place") or circuit_obj.get("locality")
+            # circuit country: try nested country dict, then nation ISO
+            c_country_raw = circuit_obj.get("country")
+            if isinstance(c_country_raw, dict):
+                c_country = c_country_raw.get("name") or c_country_raw.get("iso")
+            elif c_country_raw:
+                c_country = str(c_country_raw)
+            elif circuit_obj.get("nation"):
+                c_country = str(circuit_obj["nation"])
+
+        # season year
+        season_year: int | None = None
+        season_obj = event.get("season")
+        if isinstance(season_obj, dict):
+            with suppress(Exception):
+                season_year = int(season_obj["year"])
+        if season_year is None:
+            season_year = data.get("season_year")
+
+        # session schedule
+        next_sessions: list[dict] = data.get("next_event_sessions") or []
+        schedule = extract_session_schedule(next_sessions)
+
         return {
+            "round": round_number,
+            "race_name": event.get("name") or event.get("officialName") or event.get("short_name"),
+            "season": season_year,
             "short_name": event.get("short_name") or event.get("shortName"),
             "circuit": circuit_name(event),
+            "circuit_name": c_name,
+            "circuit_locality": c_locality,
+            "circuit_country": c_country,
             "country": country,
             "date_start": event.get("date_start") or event.get("dateStart"),
             "date_end": event.get("date_end") or event.get("dateEnd"),
+            "first_practice_start_local": schedule["first_practice_start_local"],
+            "first_practice_start_utc": schedule["first_practice_start_utc"],
+            "second_practice_start_local": schedule["second_practice_start_local"],
+            "second_practice_start_utc": schedule["second_practice_start_utc"],
+            "third_practice_start_local": schedule["third_practice_start_local"],
+            "third_practice_start_utc": schedule["third_practice_start_utc"],
+            "qualifying_start_local": schedule["qualifying_start_local"],
+            "qualifying_start_utc": schedule["qualifying_start_utc"],
+            "race_start_local": schedule["race_start_local"],
+            "race_start_utc": schedule["race_start_utc"],
         }
 
 
@@ -180,16 +242,21 @@ class MotoGPRiderStandingsSensor(MotoGPBaseSensor):
     @property
     def native_value(self) -> int | None:
         data = self.coordinator.data
-        if not isinstance(data, list):
+        if not isinstance(data, dict):
             return None
-        return len(data)
+        standings = data.get("rider_standings") or []
+        return len(standings)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         data = self.coordinator.data
-        if not isinstance(data, list):
+        if not isinstance(data, dict):
             return None
-        return {"standings": data}
+        return {
+            "season": data.get("season"),
+            "round": data.get("round"),
+            "rider_standings": data.get("rider_standings") or [],
+        }
 
 
 class MotoGPLastRaceResultsSensor(MotoGPBaseSensor):
@@ -658,7 +725,7 @@ class MotoGPConstructorStandingsSensor(MotoGPBaseSensor):
         return {"standings": data}
 
 
-class MotoGPTrackWeatherSensor(MotoGPBaseSensor):
+class MotoGPWeatherSensor(MotoGPBaseSensor):
     """Track weather fetched from Open-Meteo based on the current/next circuit."""
 
     _attr_icon = "mdi:weather-partly-cloudy"
@@ -685,6 +752,13 @@ class MotoGPTrackWeatherSensor(MotoGPBaseSensor):
             "wind_speed": data.get("wind_speed"),
             "wind_direction": data.get("wind_direction"),
             "weather_code": data.get("weather_code"),
+            "current_temperature": data.get("current_temperature"),
+            "current_precipitation_probability": data.get("current_precipitation_probability"),
+            "current_wind_speed": data.get("current_wind_speed"),
+            "current_humidity": data.get("current_humidity"),
+            "race_temperature": data.get("race_temperature"),
+            "race_precipitation_probability": data.get("race_precipitation_probability"),
+            "race_wind_speed": data.get("race_wind_speed"),
             "circuit": data.get("circuit"),
             "short_name": data.get("short_name"),
             "latitude": data.get("latitude"),
@@ -745,7 +819,7 @@ _STATIC_SENSOR_MAP: list[tuple[str, type[MotoGPBaseSensor], str]] = [
     ("rider_standings", MotoGPRiderStandingsSensor, KEY_STANDINGS_COORDINATOR),
     ("last_race_results", MotoGPLastRaceResultsSensor, KEY_LAST_RACE_COORDINATOR),
     ("constructor_standings", MotoGPConstructorStandingsSensor, KEY_CONSTRUCTOR_STANDINGS_COORDINATOR),
-    ("track_weather", MotoGPTrackWeatherSensor, KEY_WEATHER_COORDINATOR),
+    ("track_weather", MotoGPWeatherSensor, KEY_WEATHER_COORDINATOR),
 ]
 
 _LIVE_SENSOR_MAP: list[tuple[str, type[MotoGPLiveSensorBase]]] = [

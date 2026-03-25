@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import suppress
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 
@@ -132,6 +132,79 @@ def get_event_sessions(event: dict) -> list[dict]:
     """Return the sessions list embedded in an event dict, if present."""
     sessions = event.get("sessions") or event.get("sessions_list") or []
     return [s for s in sessions if isinstance(s, dict)]
+
+
+# Session type → canonical key prefix used for schedule attributes
+_SESSION_TYPE_MAP: dict[str, str] = {
+    "FP1": "first_practice",
+    "FP2": "second_practice",
+    "FP3": "third_practice",
+    "Q1": "qualifying",
+    "Q":  "qualifying",
+    "RAC": "race",
+    "RACE": "race",
+}
+
+
+def _parse_dt(raw: str | None) -> datetime | None:
+    """Parse an ISO 8601 datetime string (with or without timezone offset)."""
+    if not raw:
+        return None
+    with suppress(Exception):
+        return datetime.fromisoformat(str(raw).strip())
+    return None
+
+
+def _dt_to_local_str(dt: datetime) -> str:
+    """Return the datetime as an ISO string preserving the original offset."""
+    return dt.isoformat()
+
+
+def _dt_to_utc_str(dt: datetime) -> str:
+    """Return the datetime converted to UTC as an ISO string."""
+    if dt.tzinfo is None:
+        # Assume UTC if no timezone info
+        return dt.replace(tzinfo=timezone.utc).isoformat()
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def extract_session_schedule(sessions: list[dict]) -> dict[str, str | None]:
+    """Return a flat dict of session schedule attributes.
+
+    Keys produced (per session type resolved via _SESSION_TYPE_MAP):
+    - ``<prefix>_start_local``: ISO 8601 string preserving the circuit-local offset
+    - ``<prefix>_start_utc``:   ISO 8601 string in UTC
+
+    Only the *first* occurrence of each mapped type is used (so Q1 wins over Q2
+    for the ``qualifying`` times).
+    """
+    result: dict[str, str | None] = {}
+    seen_prefixes: set[str] = set()
+
+    for s in sessions:
+        if not isinstance(s, dict):
+            continue
+        stype = str(s.get("type") or s.get("session_type") or "").strip().upper()
+        prefix = _SESSION_TYPE_MAP.get(stype)
+        if not prefix or prefix in seen_prefixes:
+            continue
+        seen_prefixes.add(prefix)
+
+        raw_date = s.get("date") or s.get("date_start") or s.get("dateStart")
+        dt = _parse_dt(raw_date)
+        if dt is not None:
+            result[f"{prefix}_start_local"] = _dt_to_local_str(dt)
+            result[f"{prefix}_start_utc"] = _dt_to_utc_str(dt)
+        else:
+            result[f"{prefix}_start_local"] = None
+            result[f"{prefix}_start_utc"] = None
+
+    # Ensure all expected keys are present even when sessions are absent
+    for prefix in ("first_practice", "second_practice", "third_practice", "qualifying", "race"):
+        result.setdefault(f"{prefix}_start_local", None)
+        result.setdefault(f"{prefix}_start_utc", None)
+
+    return result
 
 
 # ── Lap time helpers ──────────────────────────────────────────────────────────

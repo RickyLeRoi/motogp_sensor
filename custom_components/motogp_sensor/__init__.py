@@ -67,7 +67,7 @@ _SEASON_SENSORS = frozenset(
         "rider_standings",
         "last_race_results",
         "calendar",
-        "track_weather",     # depends on season events for circuit lookup
+        "track_weather",            # depends on season events for circuit lookup
     }
 )
 _STANDINGS_SENSORS = frozenset({"rider_standings", "constructor_standings"})
@@ -361,11 +361,23 @@ class MotoGPSeasonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             events = await self._fetch_events(season_uuid)
 
+            # Fetch sessions for the next scheduled event (for schedule attributes)
+            next_event_sessions: list[dict] = []
+            with suppress(Exception):
+                next_ev = _find_next_event(events)
+                if next_ev:
+                    ev_uuid = str(next_ev.get("id") or next_ev.get("uuid") or "").strip()
+                    if ev_uuid and category_uuid:
+                        next_event_sessions = await self._fetch_event_sessions(
+                            ev_uuid, category_uuid
+                        )
+
             return {
                 "season_uuid": season_uuid,
                 "season_year": season_year,
                 "category_uuid": category_uuid,
                 "events": events,
+                "next_event_sessions": next_event_sessions,
             }
         except UpdateFailed:
             raise
@@ -425,20 +437,53 @@ class MotoGPSeasonCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             events = data.get("events") or data.get("items") or []
         return [e for e in events if isinstance(e, dict)]
 
+    async def _fetch_event_sessions(
+        self, event_uuid: str, category_uuid: str
+    ) -> list[dict]:
+        url = (
+            f"{PULSELIVE_SESSIONS_URL}"
+            f"?eventUuid={event_uuid}&categoryUuid={category_uuid}"
+        )
+        data = await _fetch_json(self._session, url)
+        sessions: list[dict] = []
+        if isinstance(data, list):
+            sessions = data
+        elif isinstance(data, dict):
+            for key in ("sessions", "items"):
+                candidate = data.get(key)
+                if isinstance(candidate, list):
+                    sessions = candidate
+                    break
+        return [s for s in sessions if isinstance(s, dict)]
 
-class MotoGPStandingsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+
+class MotoGPStandingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """
     Fetch the current MotoGP rider standings.
 
     Exposes:
-        data = list of {
-            "position": int,
-            "rider_name": str,
-            "rider_number": str,
-            "team": str,
-            "bike": str,
-            "points": float,
-            "nation": str,
+        data = {
+            "season": int,
+            "round": int,
+            "rider_standings": list of {
+                "position": str,
+                "positionText": str,
+                "points": str,
+                "wins": str,
+                "Rider": {
+                    "riderId": str,
+                    "permanentNumber": str,
+                    "code": str,
+                    "givenName": str,
+                    "familyName": str,
+                    "nationality": str,
+                },
+                "Constructor": {
+                    "constructorId": str,
+                    "name": str,
+                    "nationality": str,
+                },
+            }
         }
     """
 
@@ -457,7 +502,7 @@ class MotoGPStandingsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._session = session
         self._season_coord = season_coordinator
 
-    async def _async_update_data(self) -> list[dict[str, Any]]:
+    async def _async_update_data(self) -> dict[str, Any]:
         season_data = self._season_coord.data
         if not season_data:
             raise UpdateFailed("Season data not yet available")
@@ -465,6 +510,23 @@ class MotoGPStandingsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         category_uuid = season_data.get("category_uuid") or ""
         if not season_uuid or not category_uuid:
             raise UpdateFailed("Missing season or category UUID for standings")
+
+        # Derive season year and last completed round number
+        season_year: int | None = season_data.get("season_year")
+        events: list[dict] = season_data.get("events") or []
+        round_number: int | None = None
+        last_ev = _find_last_completed_event(events)
+        if last_ev:
+            legacy_id = last_ev.get("legacy_id")
+            if isinstance(legacy_id, list):
+                for entry in legacy_id:
+                    if isinstance(entry, dict) and entry.get("categoryId") == 1:
+                        with suppress(Exception):
+                            round_number = int(entry["eventId"])
+                        break
+            if round_number is None:
+                with suppress(Exception):
+                    round_number = events.index(last_ev) + 1
 
         url = PULSELIVE_STANDINGS_URL.format(
             season_uuid=season_uuid, category_uuid=category_uuid
@@ -476,25 +538,27 @@ class MotoGPStandingsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"HTTP error fetching standings: {err}") from err
 
-        return self._normalize_standings(data)
+        return self._normalize_standings(data, season_year, round_number)
 
     @staticmethod
-    def _normalize_standings(raw: Any) -> list[dict[str, Any]]:
-        """Normalise the standings API response to a flat list."""
+    def _normalize_standings(
+        raw: Any,
+        season_year: int | None = None,
+        round_number: int | None = None,
+    ) -> dict[str, Any]:
+        """Normalise the standings API response to an F1-compatible structure."""
         if raw is None:
-            return []
+            return {"season": season_year, "round": round_number, "rider_standings": []}
         entries: list[dict] = []
         if isinstance(raw, list):
             entries = raw
         elif isinstance(raw, dict):
-            # Try common response wrapper keys
             for key in ("classification", "standings", "items", "riders", "results"):
                 candidate = raw.get(key)
                 if isinstance(candidate, list):
                     entries = candidate
                     break
             if not entries:
-                # Response might be the list itself wrapped in a results key
                 for val in raw.values():
                     if isinstance(val, list) and val:
                         entries = val
@@ -504,61 +568,136 @@ class MotoGPStandingsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         for item in entries:
             if not isinstance(item, dict):
                 continue
-            rider = item.get("rider") or item.get("Rider") or item
+            rider = item.get("rider") or item.get("Rider") or {}
             team_obj = item.get("team") or item.get("Team") or {}
             constructor_obj = item.get("constructor") or item.get("Constructor") or {}
+
+            position_raw = item.get("position") or item.get("pos") or ""
+            position_str = str(position_raw).strip() if position_raw is not None else ""
+            points_raw = item.get("points") or item.get("total_points") or 0
+            points_str = str(int(float(points_raw))) if points_raw is not None else "0"
+            with suppress(Exception):
+                points_str = str(int(float(points_raw)))
+            wins_raw = (
+                item.get("wins")
+                or item.get("number_of_wins")
+                or item.get("total_wins")
+                or item.get("victories")
+                or item.get("first_positions")
+                or 0
+            )
+            wins_str = "0"
+            with suppress(Exception):
+                wins_str = str(int(wins_raw)) if wins_raw else "0"
+
             if isinstance(rider, dict):
-                full_name = (
-                    rider.get("full_name")
-                    or rider.get("fullName")
-                    or (
-                        (rider.get("name") or "") + " " + (rider.get("surname") or "")
+                given_name = str(
+                    rider.get("name")
+                    or rider.get("given_name")
+                    or rider.get("first_name")
+                    or rider.get("given_names")
+                    or ""
+                ).strip()
+                family_name = str(
+                    rider.get("surname")
+                    or rider.get("family_name")
+                    or rider.get("last_name")
+                    or rider.get("surnames")
+                    or ""
+                ).strip()
+                # If separate names not found, try splitting full_name
+                if not given_name and not family_name:
+                    full = str(
+                        rider.get("full_name") or rider.get("fullName") or ""
                     ).strip()
-                    or None
-                )
+                    if full:
+                        parts = full.rsplit(" ", 1)
+                        given_name = parts[0] if len(parts) > 1 else ""
+                        family_name = parts[-1]
+                tla = str(
+                    rider.get("short_name")
+                    or rider.get("legacy_short_name")
+                    or rider.get("abbreviation")
+                    or rider.get("code")
+                    or rider.get("tla")
+                    or ""
+                ).strip().upper()
                 nation = (
                     rider.get("country", {}).get("iso")
                     if isinstance(rider.get("country"), dict)
-                    else rider.get("nation") or rider.get("nationality")
+                    else rider.get("nation") or rider.get("nationality") or ""
                 )
                 rider_number = str(
                     rider.get("number") or rider.get("bike_number") or ""
-                ).strip() or None
+                ).strip()
+                rider_id = str(
+                    rider.get("id") or rider.get("uuid") or
+                    f"{given_name}_{family_name}".lower().replace(" ", "_")
+                ).strip()
             else:
-                full_name = str(rider or "")
-                nation = None
-                rider_number = None
+                given_name = family_name = tla = nation = rider_number = rider_id = ""
 
-            team_name = (
-                team_obj.get("name") if isinstance(team_obj, dict) else str(team_obj)
-            ) or item.get("team_name") or None
-            bike = (
-                constructor_obj.get("name")
-                if isinstance(constructor_obj, dict)
-                else str(constructor_obj)
-            ) or item.get("bike") or item.get("constructor") or None
-
-            position_raw = item.get("position") or item.get("pos")
-            points_raw = item.get("points") or item.get("total_points") or 0
-            position: int | None = None
-            points: float = 0.0
-            with suppress(Exception):
-                position = int(position_raw) if position_raw is not None else None
-            with suppress(Exception):
-                points = float(points_raw) if points_raw is not None else 0.0
+            if isinstance(constructor_obj, dict):
+                constructor_name = str(constructor_obj.get("name") or "").strip()
+                constructor_id = str(
+                    constructor_obj.get("id") or constructor_obj.get("uuid") or
+                    constructor_name.lower().replace(" ", "_")
+                ).strip()
+                # Country info may be a nested dict, a flat string, or on the team object
+                con_country = constructor_obj.get("country")
+                if isinstance(con_country, dict):
+                    constructor_nation = str(
+                        con_country.get("name") or con_country.get("iso") or ""
+                    ).strip()
+                elif con_country:
+                    constructor_nation = str(con_country).strip()
+                else:
+                    # Fallback: check team object
+                    team_country = team_obj.get("country") if isinstance(team_obj, dict) else None
+                    if isinstance(team_country, dict):
+                        constructor_nation = str(
+                            team_country.get("name") or team_country.get("iso") or ""
+                        ).strip()
+                    else:
+                        constructor_nation = str(
+                            constructor_obj.get("nation")
+                            or constructor_obj.get("nationality")
+                            or (team_obj.get("nation") if isinstance(team_obj, dict) else None)
+                            or ""
+                        ).strip()
+            else:
+                constructor_name = (
+                    team_obj.get("name") if isinstance(team_obj, dict) else str(team_obj or "")
+                ).strip()
+                constructor_id = constructor_name.lower().replace(" ", "_")
+                constructor_nation = ""
 
             result.append(
                 {
-                    "position": position,
-                    "rider_name": full_name,
-                    "rider_number": rider_number,
-                    "team": team_name,
-                    "bike": bike,
-                    "points": points,
-                    "nation": nation,
+                    "position": position_str,
+                    "positionText": position_str,
+                    "points": points_str,
+                    "wins": wins_str,
+                    "Rider": {
+                        "riderId": rider_id,
+                        "permanentNumber": rider_number,
+                        "code": tla,
+                        "givenName": given_name,
+                        "familyName": family_name,
+                        "nationality": nation,
+                    },
+                    "Constructor": {
+                        "constructorId": constructor_id,
+                        "name": constructor_name,
+                        "nationality": constructor_nation,
+                    },
                 }
             )
-        return result
+        return {
+            "season": season_year,
+            "round": round_number,
+            "rider_standings": result,
+        }
 
 
 class MotoGPConstructorStandingsCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -968,12 +1107,19 @@ class MotoGPWeatherCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
 
     Exposes:
         data = {
-            "condition": str,       # human-readable WMO condition
-            "weather_code": int,    # raw WMO code
-            "air_temp": float,      # °C
-            "humidity": int,        # %
-            "wind_speed": float,    # km/h
-            "wind_direction": int,  # degrees
+            "condition": str,                          # human-readable WMO condition
+            "weather_code": int,                       # raw WMO code
+            "air_temp": float,                         # °C
+            "humidity": int,                           # %
+            "wind_speed": float,                       # km/h
+            "wind_direction": int,                     # degrees
+            "current_temperature": float,              # current temperature °C
+            "current_precipitation_probability": int,  # current precip. probability %
+            "current_wind_speed": float,               # current wind speed km/h
+            "current_humidity": int,                   # current relative humidity %
+            "race_temperature": float | None,          # forecasted max temp on race day
+            "race_precipitation_probability": int | None, # forecasted precip. prob. on race day
+            "race_wind_speed": float | None,           # forecasted max wind speed on race day
             "circuit": str,
             "short_name": str,
             "latitude": float,
@@ -1015,12 +1161,25 @@ class MotoGPWeatherCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             return None
 
         lat, lon = coords
+
+        # Determine how many forecast days are needed to cover the race day
+        race_date_str = str(event.get("date_end") or "")[:10]
+        forecast_days = 1
+        race_date: date | None = None
+        with suppress(Exception):
+            race_date = date.fromisoformat(race_date_str)
+            days_ahead = (race_date - date.today()).days
+            if days_ahead >= 0:
+                forecast_days = min(16, days_ahead + 1)
+
         url = (
             f"{OPEN_METEO_URL}"
             f"?latitude={lat}&longitude={lon}"
             f"&current=temperature_2m,weather_code,wind_speed_10m,"
-            f"wind_direction_10m,relative_humidity_2m"
-            f"&temperature_unit=celsius&wind_speed_unit=kmh&forecast_days=1"
+            f"wind_direction_10m,relative_humidity_2m,precipitation_probability"
+            f"&daily=temperature_2m_max,precipitation_probability_max,wind_speed_10m_max"
+            f"&temperature_unit=celsius&wind_speed_unit=kmh"
+            f"&forecast_days={forecast_days}"
         )
         try:
             data = await _fetch_json(self._session, url)
@@ -1038,6 +1197,22 @@ class MotoGPWeatherCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             circuit_obj.get("name") if isinstance(circuit_obj, dict) else str(circuit_obj)
         ) or event.get("name") or None
 
+        # Parse daily forecast to find race-day values
+        race_temperature: float | None = None
+        race_precip_probability: int | None = None
+        race_wind_speed: float | None = None
+        if isinstance(data, dict) and race_date is not None:
+            daily = data.get("daily") or {}
+            daily_times: list[str] = daily.get("time") or []
+            daily_temp_max: list = daily.get("temperature_2m_max") or []
+            daily_precip_prob: list = daily.get("precipitation_probability_max") or []
+            daily_wind_max: list = daily.get("wind_speed_10m_max") or []
+            with suppress(Exception):
+                idx = daily_times.index(race_date_str)
+                race_temperature = daily_temp_max[idx] if idx < len(daily_temp_max) else None
+                race_precip_probability = daily_precip_prob[idx] if idx < len(daily_precip_prob) else None
+                race_wind_speed = daily_wind_max[idx] if idx < len(daily_wind_max) else None
+
         return {
             "condition": _wmo_to_condition(wmo),
             "weather_code": wmo,
@@ -1045,6 +1220,13 @@ class MotoGPWeatherCoordinator(DataUpdateCoordinator[dict[str, Any] | None]):
             "humidity": current.get("relative_humidity_2m"),
             "wind_speed": current.get("wind_speed_10m"),
             "wind_direction": current.get("wind_direction_10m"),
+            "current_temperature": current.get("temperature_2m"),
+            "current_precipitation_probability": current.get("precipitation_probability"),
+            "current_wind_speed": current.get("wind_speed_10m"),
+            "current_humidity": current.get("relative_humidity_2m"),
+            "race_temperature": race_temperature,
+            "race_precipitation_probability": race_precip_probability,
+            "race_wind_speed": race_wind_speed,
             "circuit": circuit_name,
             "short_name": event.get("short_name"),
             "latitude": lat,
